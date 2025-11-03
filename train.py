@@ -22,6 +22,10 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+
+import numpy as np
+import matplotlib.pyplot as plt
+
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -39,6 +43,92 @@ try:
     SPARSE_ADAM_AVAILABLE = True
 except:
     SPARSE_ADAM_AVAILABLE = False
+    
+def generate_orbiting_trajectory(center, radius, num_cameras=60, axis='z'):
+    """
+    Generates a camera trajectory that orbits a center point at a fixed radius.
+
+    Args:
+        center (list/np.array): The [x, y, z] coordinates of the point to orbit around.
+        radius (float): The radius of the orbit.
+        num_cameras (int): The number of camera positions to generate (e.g., frames).
+        axis (str): The axis around which the orbit should occur ('x', 'y', or 'z').
+                    'z' is typical for horizontal orbits (yaw).
+
+    Returns:
+        tuple: (camera_positions, camera_rotations)
+            - camera_positions (np.array): (N, 3) array of [x, y, z] camera coordinates.
+            - camera_rotations (np.array): (N, 3, 3) array of 3x3 rotation matrices.
+    """
+    center = np.array(center)
+    
+    # 1. Define the orbit plane based on the axis
+    if axis == 'x':
+        plane_indices = (1, 2)  # Orbit in the Y-Z plane
+        up_vector = np.array([1.0, 0.0, 0.0])
+    elif axis == 'y':
+        plane_indices = (0, 2)  # Orbit in the X-Z plane
+        up_vector = np.array([0.0, 1.0, 0.0])
+    elif axis == 'z':
+        plane_indices = (0, 1)  # Orbit in the X-Y plane (typical horizontal orbit)
+        up_vector = np.array([0.0, 0.0, 1.0])
+    else:
+        raise ValueError("Axis must be 'x', 'y', or 'z'.")
+
+    # 2. Generate angular positions
+    thetas = np.linspace(0, 2 * np.pi, num_cameras, endpoint=False)
+    
+    # 3. Calculate Camera Positions (C)
+    positions = np.zeros((num_cameras, 3))
+    
+    for i, theta in enumerate(thetas):
+        # Calculate the camera position relative to the center in the chosen plane
+        pos_relative = np.zeros(3)
+        pos_relative[plane_indices[0]] = radius * np.cos(theta)
+        pos_relative[plane_indices[1]] = radius * np.sin(theta)
+        
+        # Add the center offset
+        positions[i] = center + pos_relative
+
+    # 4. Calculate Camera Rotations (R)
+    rotations = np.zeros((num_cameras, 3, 3))
+    
+    for i in range(num_cameras):
+        # The camera always looks *at* the center point.
+        # This means the Z-axis of the camera frame (its viewing direction) 
+        # is the normalized vector from the camera position (C) to the center.
+        
+        # Forward vector (Z-axis of camera frame)
+        # It's directed FROM the camera TO the center
+        forward_vec = (center - positions[i])
+        forward_vec /= np.linalg.norm(forward_vec)
+        
+        # Up vector: Assume a constant global up vector (e.g., Z-axis for horizontal orbit)
+        # Note: If the center is on the orbit plane (e.g., center=[0,0,0], radius=4, axis='z'), 
+        # using a simple 'z' up_vector will fail when the camera is at the top/bottom 
+        # of the orbit. We use the up_vector defined in step 1.
+        
+        # Right vector (X-axis of camera frame) - calculated via cross product
+        right_vec = np.cross(forward_vec, up_vector)
+        # If right_vec is near zero (e.g., camera directly below center), flip the up vector
+        if np.linalg.norm(right_vec) < 1e-6:
+             up_vector_adjusted = np.array([0.0, 1.0, 0.0]) # Use a non-collinear vector
+             if axis == 'z': # But don't use Z if we are orbiting Z
+                 up_vector_adjusted = np.array([1.0, 0.0, 0.0])
+             right_vec = np.cross(forward_vec, up_vector_adjusted)
+
+        right_vec /= np.linalg.norm(right_vec)
+
+        # Re-calculate the True Up vector (Y-axis of camera frame) - ensuring orthogonality
+        up_vec_final = np.cross(right_vec, forward_vec)
+        up_vec_final /= np.linalg.norm(up_vec_final)
+
+        # The rotation matrix R is composed of [Right | Up | Forward] vectors 
+        # in the common computer graphics convention (X=Right, Y=Up, Z=Forward)
+        R = np.stack([right_vec, up_vec_final, forward_vec], axis=1)
+        rotations[i] = R
+
+    return positions, rotations
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
 
